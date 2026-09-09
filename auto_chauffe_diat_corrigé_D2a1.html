@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Auto-chauffe – D2a-1 (diatonique strict)</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay/build/opensheetmusicdisplay.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #f5f5f7; }
+    header { background: #222; color: #fff; padding: 1rem; text-align: center; }
+    main { max-width: 900px; margin: auto; padding: 1rem; }
+    section { margin-bottom: 2rem; padding-top: 1rem; border-top: 1px solid #ddd; }
+    .step-title { font-weight: 600; margin-bottom: 0.5rem; }
+    .btn {
+      padding: 0.8rem 1.2rem;
+      border-radius: 8px;
+      border: none;
+      background: #0078d4;
+      color: #fff;
+      font-size: 1rem;
+      margin-top: 0.5rem;
+      cursor: pointer;
+    }
+    .btn:disabled { background: #aaa; }
+    #osmdOriginal, #osmdTransposed {
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin-top: 20px;
+      background: #fafafa;
+      width: 100%;
+      overflow-x: auto;
+    }
+    .log {
+      font-family: monospace;
+      font-size: 0.85rem;
+      background: #fafafa;
+      border: 1px solid #eee;
+      padding: 0.5rem;
+      border-radius: 4px;
+      max-height: 150px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+
+<body>
+<header>
+  <h1>Auto-chauffe – D2a-1 (diatonique strict)</h1>
+  <p>Transposition musicale réelle, sans compensation d’armure</p>
+</header>
+
+<main>
+
+  <section>
+    <div class="step-title">Étape 1 – Charger une partition</div>
+    <input type="file" id="xmlInput" accept=".musicxml,.xml" class="btn">
+    <div id="fileInfo"></div>
+    <h3>Partition originale</h3>
+    <div id="osmdOriginal"></div>
+  </section>
+
+  <section>
+    <div class="step-title">Étape 2 – Détection audio</div>
+    <button id="startAudioBtn" class="btn">🎤 Démarrer l'écoute</button>
+    <button id="stopAudioBtn" class="btn" disabled>🛑 Arrêter</button>
+    <div id="audioStatus"></div>
+    <div id="noteInfo"></div>
+    <div id="intervalInfo"></div>
+  </section>
+
+  <section>
+    <div class="step-title">Étape 3 – Transposition D2a-1</div>
+    <button id="transposeBtn" class="btn" disabled>🎼 Transposer</button>
+    <div id="resultInfo"></div>
+    <h3>Partition transposée</h3>
+    <div id="osmdTransposed"></div>
+  </section>
+
+  <section>
+    <div class="step-title">Journal</div>
+    <div id="log" class="log"></div>
+  </section>
+
+</main>
+
+<script>
+let osmdOriginal = null;
+let osmdTransposed = null;
+let xmlContent = null;
+
+let firstNoteMidi = null;
+let playedNote = null;
+let interval = 0;
+
+let initialFifths = 0;
+let initialMode = "major";
+
+const xmlInput = document.getElementById("xmlInput");
+const fileInfo = document.getElementById("fileInfo");
+const startAudioBtn = document.getElementById("startAudioBtn");
+const stopAudioBtn = document.getElementById("stopAudioBtn");
+const audioStatus = document.getElementById("audioStatus");
+const noteInfo = document.getElementById("noteInfo");
+const intervalInfo = document.getElementById("intervalInfo");
+const transposeBtn = document.getElementById("transposeBtn");
+const resultInfo = document.getElementById("resultInfo");
+const logDiv = document.getElementById("log");
+
+function log(msg) { logDiv.textContent += msg + "\n"; }
+
+/* --- Conversion note ↔ MIDI --- */
+function midiFromNote(step, alter, octave) {
+  const stepValues = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+  return 12 * (octave + 1) + stepValues[step] + alter;
+}
+
+function noteFromMidi(midi) {
+  const steps = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+  const stepName = steps[midi % 12];
+  const octave = Math.floor(midi / 12) - 1;
+  let step = stepName[0];
+  let alter = stepName.includes("#") ? 1 : 0;
+  return { step, alter, octave };
+}
+
+/* --- Chargement XML --- */
+xmlInput.addEventListener("change", () => {
+  const file = xmlInput.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    xmlContent = e.target.result;
+    fileInfo.textContent = "Partition chargée : " + file.name;
+
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(xmlContent, "application/xml");
+
+    const firstNoteNode = xmlDoc.querySelector("note pitch");
+    if (firstNoteNode) {
+      const step = firstNoteNode.querySelector("step").textContent;
+      const octave = parseInt(firstNoteNode.querySelector("octave").textContent);
+      const alterNode = firstNoteNode.querySelector("alter");
+      const alter = alterNode ? parseInt(alterNode.textContent) : 0;
+      firstNoteMidi = midiFromNote(step, alter, octave);
+      log("Première note : " + step + (alter===1?"#":alter===-1?"b":"") + octave);
+    }
+
+    const keyNode = xmlDoc.querySelector("key");
+    if (keyNode) {
+      initialFifths = parseInt(keyNode.querySelector("fifths").textContent);
+      const modeNode = keyNode.querySelector("mode");
+      if (modeNode) initialMode = modeNode.textContent;
+    }
+
+    osmdOriginal = new opensheetmusicdisplay.OpenSheetMusicDisplay("osmdOriginal");
+    await osmdOriginal.load(xmlContent);
+    osmdOriginal.render();
+  };
+
+  reader.readAsText(file);
+});
+
+/* --- Détection audio --- */
+let audioContext = null;
+let analyser = null;
+let mediaStream = null;
+let audioInterval = null;
+
+function autoCorrelate(buffer, sampleRate) {
+  let SIZE = buffer.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) rms += buffer[i] * buffer[i];
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < 0.01) return -1;
+
+  let c = new Array(SIZE).fill(0);
+  for (let i = 0; i < SIZE; i++) {
+    for (let j = 0; j < SIZE - i; j++) {
+      c[i] += buffer[j] * buffer[j + i];
+    }
+  }
+
+  let d = 0;
+  while (c[d] > c[d + 1]) d++;
+  let maxval = -1, maxpos = -1;
+  for (let i = d; i < SIZE; i++) {
+    if (c[i] > maxval) {
+      maxval = c[i];
+      maxpos = i;
+    }
+  }
+  return sampleRate / maxpos;
+}
+
+function freqToNoteName(freq) {
+  const A4 = 440;
+  const midi = Math.round(69 + 12 * Math.log2(freq / A4));
+  const note = noteFromMidi(midi);
+
+  let display = note.step;
+  if (note.alter === 1) display += "#";
+  if (note.alter === -1) display += "b";
+  display += note.octave;
+
+  return { midi, display };
+}
+
+startAudioBtn.addEventListener("click", async () => {
+  try {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+
+    audioStatus.textContent = "Écoute en cours…";
+    startAudioBtn.disabled = true;
+    stopAudioBtn.disabled = false;
+
+    const buffer = new Float32Array(analyser.fftSize);
+
+    audioInterval = setInterval(() => {
+      analyser.getFloatTimeDomainData(buffer);
+      const freq = autoCorrelate(buffer, audioContext.sampleRate);
+      if (freq > 0) {
+        const { midi, display } = freqToNoteName(freq);
+        playedNote = display;
+        noteInfo.textContent = "Note détectée : " + playedNote;
+
+        if (firstNoteMidi !== null) {
+          interval = midi - firstNoteMidi;
+          intervalInfo.textContent =
+            `Intervalle : ${interval >= 0 ? "+" : ""}${interval} demi-tons`;
+          transposeBtn.disabled = false;
+        }
+      }
+    }, 200);
+  } catch (e) {
+    audioStatus.textContent = "Erreur micro.";
+  }
+});
+
+stopAudioBtn.addEventListener("click", () => {
+  if (audioInterval) clearInterval(audioInterval);
+  if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+  if (audioContext) audioContext.close();
+  audioStatus.textContent = "Arrêté.";
+  startAudioBtn.disabled = false;
+  stopAudioBtn.disabled = true;
+});
+
+/* --- Transposition D2a-1 --- */
+
+transposeBtn.addEventListener("click", async () => {
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xmlContent, "application/xml");
+
+  const notes = xmlDoc.querySelectorAll("note");
+  const stepOrder = ["C","D","E","F","G","A","B"];
+
+  const firstStep = noteFromMidi(firstNoteMidi).step;
+  const playedStep = playedNote[0];
+
+  const idxFirst = stepOrder.indexOf(firstStep);
+  const idxPlayed = stepOrder.indexOf(playedStep);
+
+  let diatonicSteps = idxPlayed - idxFirst;
+  if (diatonicSteps < 0) diatonicSteps += 7;
+
+  notes.forEach(note => {
+    const pitch = note.querySelector("pitch");
+    if (!pitch) return;
+
+    const step = pitch.querySelector("step").textContent;
+    const octave = parseInt(pitch.querySelector("octave").textContent);
+    const alterNode = pitch.querySelector("alter");
+    const alter = alterNode ? parseInt(alterNode.textContent) : 0;
+
+    const midiOld = midiFromNote(step, alter, octave);
+    const midiTarget = midiOld + interval;
+
+    const idxOld = stepOrder.indexOf(step);
+    const idxNew = (idxOld + diatonicSteps) % 7;
+    const newStep = stepOrder[idxNew];
+
+    let bestOctave = octave;
+    let bestDiff = Infinity;
+
+    for (let o = octave - 1; o <= octave + 1; o++) {
+      const baseMidi = midiFromNote(newStep, 0, o);
+      const diff = Math.abs(baseMidi - midiTarget);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestOctave = o;
+      }
+    }
+
+    const baseMidi = midiFromNote(newStep, 0, bestOctave);
+    let newAlter = midiTarget - baseMidi;
+
+    pitch.querySelector("step").textContent = newStep;
+    pitch.querySelector("octave").textContent = bestOctave;
+
+    if (newAlter !== 0) {
+      if (!alterNode) {
+        const newAlterNode = xmlDoc.createElement("alter");
+        newAlterNode.textContent = newAlter;
+        pitch.appendChild(newAlterNode);
+      } else {
+        alterNode.textContent = newAlter;
+      }
+    } else if (alterNode) {
+      alterNode.remove();
+    }
+  });
+
+  const serializer = new XMLSerializer();
+  const xmlTransposed = serializer.serializeToString(xmlDoc);
+
+  osmdTransposed = new opensheetmusicdisplay.OpenSheetMusicDisplay("osmdTransposed");
+  await osmdTransposed.load(xmlTransposed);
+  osmdTransposed.render();
+
+  resultInfo.innerHTML =
+    "Transposition D2a-1 effectuée (diatonique strict, altération brute).";
+});
+</script>
+
+</body>
+</html>
